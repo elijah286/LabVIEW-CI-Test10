@@ -1,8 +1,15 @@
 {
   "schema": 1,
   "repo": "elijah286/LabVIEW-CI-Test10",
-  "sha": "b1b79aa22d7077286e6cf9b5cb6a3d345b78bddb",
+  "sha": "9f5901fd0875671be0c008ec17127f0792d2f327",
   "revisions": [
+    {
+      "sha": "9f5901fd0875671be0c008ec17127f0792d2f327",
+      "short": "9f5901f",
+      "message": "ci: adopt LabVIEW CI tooling v4.4.9 (full update)",
+      "author": "github-actions[bot]",
+      "date": "2026-07-14T17:52:06Z"
+    },
     {
       "sha": "b1b79aa22d7077286e6cf9b5cb6a3d345b78bddb",
       "short": "b1b79aa",
@@ -28,14 +35,20 @@
   "config": {
     "use": "",
     "actions": {},
-    "vipc": []
+    "vipc": [],
+    "dragon": [],
+    "hasVipcList": false,
+    "hasDragonList": false
   },
   "vipc": [
     {
       "path": ".github/labview/vipm/ci-tooling.vipc",
       "role": "core",
       "capability": "",
+      "tooling": true,
       "configured": true,
+      "monitored": true,
+      "locked": true,
       "packages": [
         "dataflow_g_lib_g_image-0.5.0.1",
         "jki_lib_caraya-1.4.4.148",
@@ -49,7 +62,10 @@
       "path": "COTC Dependencies.vipc",
       "role": "project",
       "capability": "",
+      "tooling": false,
       "configured": true,
+      "monitored": true,
+      "locked": false,
       "packages": [
         "dataflow_g_lib_g_image-0.5.0.1",
         "oglib_appcontrol-4.1.0.7",
@@ -140,7 +156,40 @@
     "install_set": [],
     "conflicts": []
   },
-  "system": [],
+  "system": [
+    {
+      "name": "VI Browser 2.0 toimages runner",
+      "source": "Repository Go code",
+      "path": ".github/labview/toimages/main.go",
+      "details": "Batch runner compiled from repo Go source; Linux uses the toimages GHCR image and Windows builds runner.exe in the workflow.",
+      "platforms": {
+        "windows": {
+          "present": true,
+          "label": "workflow-built"
+        },
+        "linux": {
+          "present": true,
+          "label": "toimages image"
+        }
+      }
+    },
+    {
+      "name": "lvctl render engine",
+      "source": "Repository Go code + embedded VIs",
+      "path": ".github/labview/toimages/_ni/labview/lvctl",
+      "details": "Renderer used by VI Browser 2.0 to drive LabVIEW and emit position-aware frame JSON.",
+      "platforms": {
+        "windows": {
+          "present": true,
+          "label": "workflow-built"
+        },
+        "linux": {
+          "present": true,
+          "label": "toimages image"
+        }
+      }
+    }
+  ],
   "columns": [
     {
       "key": "windows",
