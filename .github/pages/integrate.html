@@ -26,6 +26,10 @@
         --chip:#eaeef2;--code:#f6f8fa;
       }
     }
+    /* Re-assert page-specific tokens the shared header's theme toggle doesn't
+       manage, so a forced Light/Dark choice fully re-themes this page. */
+    :root[data-lvci-theme=dark]{--surface2:#0d1117}
+    :root[data-lvci-theme=light]{--surface2:#fff}
     *{box-sizing:border-box}
     body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
          background:var(--bg);color:var(--fg);line-height:1.5}
@@ -1023,57 +1027,96 @@
     // (open preferred, else most recent) and whether the install branch still exists.
     async function probeRepoInstall(repo) {
       const owner = repo.split("/")[0];
-      let pr = null, branchExists = false;
+      let pr = null, branchExists = false, prOk = false, branchOk = false;
       try {
         const pls = await ghJson(await gh(`/repos/${repo}/pulls?state=all&head=${owner}:${INSTALL_BRANCH}&per_page=5`));
+        prOk = true;
         if (Array.isArray(pls) && pls.length) {
           const chosen = pls.find(p => p.state === "open") || pls[0];
           pr = { number: chosen.number, url: chosen.html_url, state: chosen.state, merged: !!chosen.merged_at };
         }
       } catch (_) {}
-      try { const r = await gh(`/repos/${repo}/git/ref/heads/${INSTALL_BRANCH}`); branchExists = r.ok; } catch (_) {}
-      return { pr: pr, branchExists: branchExists };
+      try { const r = await gh(`/repos/${repo}/git/ref/heads/${INSTALL_BRANCH}`); branchExists = r.ok; branchOk = true; } catch (_) {}
+      return { pr: pr, branchExists: branchExists, ok: prOk && branchOk };
     }
 
-    // Is there an install already in flight for this repo (a local record in a live
-    // phase, an open install PR, or a leftover install branch)? Returns details for
-    // the duplicate-warning panel, or null when the repo is clear to install.
+    // Is there an install already in flight for this repo? Live GitHub state is
+    // authoritative: an OPEN install PR, or the install branch when its PR has not
+    // yet merged/closed. GitHub does NOT delete the head branch on merge by default,
+    // so a finished, merged install leaves `ci/install-labview-ci` behind -- that
+    // leftover branch must NOT be mistaken for an install still in progress. A local
+    // record only blocks when a dashboard is genuinely still publishing (that window
+    // has no PR/branch to probe), verified against the live dashboard; any other
+    // stale live-phase record that GitHub contradicts is forgotten so it stops
+    // nagging on every future install. Returns details for the duplicate-warning
+    // panel, or null when the repo is clear to install.
     async function detectInFlight(repo) {
       const rec = getInstall(repo);
-      let probe = { pr: null, branchExists: false };
+      let probe = { pr: null, branchExists: false, ok: false };
       try { probe = await probeRepoInstall(repo); } catch (_) {}
-      const openPr = probe.pr && probe.pr.state === "open";
-      const liveRec = !!(rec && LIVE_PHASES.indexOf(rec.phase) >= 0);
-      if (openPr || probe.branchExists || liveRec) return { pr: probe.pr, branchExists: probe.branchExists, rec: rec };
+      const openPr = !!(probe.pr && probe.pr.state === "open");
+      const prSettled = !!(probe.pr && (probe.pr.merged || probe.pr.state === "closed"));
+      const liveBranch = probe.branchExists && !prSettled;
+      if (openPr || liveBranch) return { pr: probe.pr, branchExists: liveBranch, rec: rec };
+      if (rec && rec.phase === "publishing") {
+        const dash = rec.dashUrl || dashboardUrl(repo);
+        let live = false;
+        try { live = rec.version ? await deployedAtLeast(dash, rec.version) : await publishedCatalogVersion(dash); } catch (_) {}
+        if (!live) return { pr: probe.pr, branchExists: false, rec: rec };
+        dropInstall(repo);                                   // dashboard already live -> install is done
+        return null;
+      }
+      if (probe.ok && rec && LIVE_PHASES.indexOf(rec.phase) >= 0) dropInstall(repo);   // stale leftover -> forget it
       return null;
+    }
+
+    // A tracked dashboard publish is settled once the repo's published catalog
+    // reaches the version that was installed. The dashboard action a repo runs can
+    // publish a different version line than the installer page is on, so once the
+    // dashboard has simply been live for a while past the install we treat a live
+    // dashboard as done rather than waiting forever for an exact version match
+    // (otherwise a finished install is shown as "Publishing dashboard..." forever).
+    const PUBLISH_SETTLE_MS = 15 * 60 * 1000;
+    async function publishSettled(dash, rec) {
+      const have = await publishedCatalogVersion(dash);
+      if (!have) return false;                               // dashboard not live yet -> still publishing
+      const want = (rec && rec.version) || "";
+      if (!want || cmpVerStr(have, want) >= 0) return true;   // reached the installed version (or none recorded)
+      const since = (rec && (rec.startedAt || rec.updatedAt)) || 0;
+      return since > 0 && (Date.now() - since) > PUBLISH_SETTLE_MS;  // version skew -> don't wait forever
     }
 
     // Reconcile one tracked install against live GitHub state; updates or drops it.
     let _reconciling = false;
     async function reconcileOne(repo, rec) {
       const probe = await probeRepoInstall(repo);
-      const ver = (rec && rec.version) || (catalog && catalog.version) || "";
       const dash = (rec && rec.dashUrl) || dashboardUrl(repo);
       if (probe.pr) {
         if (probe.pr.state === "open") { putInstall(repo, { phase: "pr-open", prNumber: probe.pr.number, prUrl: probe.pr.url, branch: INSTALL_BRANCH }); return; }
         if (probe.pr.merged) {
-          if (ver && await deployedAtLeast(dash, ver)) { dropInstall(repo); return; }
+          if (await publishSettled(dash, rec)) { dropInstall(repo); return; }
           putInstall(repo, { phase: "publishing", prNumber: probe.pr.number, prUrl: probe.pr.url }); return;
         }
         dropInstall(repo); return;                       // PR closed without merging -> abandoned
       }
       if (probe.branchExists) { putInstall(repo, { phase: "preparing", branch: INSTALL_BRANCH }); return; }
       if (rec && rec.phase === "publishing") {
-        if (!ver || await deployedAtLeast(dash, ver)) dropInstall(repo);
-        return;                                          // keep waiting on the published version otherwise
+        if (await publishSettled(dash, rec)) dropInstall(repo);
+        return;                                          // keep waiting on the live dashboard otherwise
       }
       dropInstall(repo);                                 // no PR, no branch, not publishing -> done/gone
     }
     async function reconcileInstalls() {
       if (_reconciling) return;
-      if (!getInsTok()) { renderInstallList(); return; }
+      const hasTok = !!getInsTok();
+      const o = loadInstallReg();
+      // Without a saved token we can't probe GitHub, but a tracked "publishing"
+      // record can still settle from the public dashboard URL, so reconcile those
+      // too -> finished installs clear themselves. A full reconcile needs a token.
+      const keys = Object.keys(o).filter(r => hasTok || (o[r] && o[r].phase === "publishing"));
+      if (!keys.length) { renderInstallList(); return; }
       _reconciling = true;
-      try { const o = loadInstallReg(); for (const r of Object.keys(o)) { try { await reconcileOne(r, o[r]); } catch (_) {} } }
+      try { for (const r of keys) { try { await reconcileOne(r, o[r]); } catch (_) {} } }
       finally { _reconciling = false; }
       renderInstallList();
     }
@@ -1082,10 +1125,13 @@
     // is visible and a token is saved) so the list stays honest without a reload.
     let _recTimer = null;
     function scheduleReconcile() {
-      const has = Object.keys(loadInstallReg()).length > 0;
-      if (has && getInsTok() && !_recTimer) {
+      const o = loadInstallReg();
+      // Re-check while there is anything to reconcile: any record when a token is
+      // saved, or a "publishing" record (which settles from the public dashboard).
+      const canReconcile = Object.keys(o).some(r => getInsTok() || (o[r] && o[r].phase === "publishing"));
+      if (canReconcile && !_recTimer) {
         _recTimer = setInterval(() => { if (!document.hidden) reconcileInstalls(); }, 10000);
-      } else if ((!has || !getInsTok()) && _recTimer) { clearInterval(_recTimer); _recTimer = null; }
+      } else if (!canReconcile && _recTimer) { clearInterval(_recTimer); _recTimer = null; }
     }
 
     // ---- duplicate-in-flight warning panel -------------------------------
@@ -1251,11 +1297,11 @@
       if (opts.buildLinuxImage) imgs.push("Linux");
       if (opts.buildWindowsBeta) imgs.push("Windows Beta");
       installPlanSteps = [
-        { id: "prepare", title: "Prepare install pull request", eta: "~1 min", state: "active", detail: "Reading the repo, fetching the selected tooling, and opening the install PR." },
-        { id: "merge", title: "Merge install pull request", eta: opts.autoMerge ? "seconds" : "your review", state: "pending", detail: opts.autoMerge ? "The configurator will squash-merge it after the branch is ready." : "Review and merge the PR when you are ready; setup continues after the merge." }
+        { id: "prepare", title: "Prepare install pull request", eta: "under 1 min", state: "active", detail: "Reading the repo, fetching the selected tooling, and opening the install PR." },
+        { id: "merge", title: "Merge install pull request", eta: opts.autoMerge ? "a few seconds" : "your review", state: "pending", detail: opts.autoMerge ? "The configurator will squash-merge it after the branch is ready." : "Review and merge the PR when you are ready; setup continues after the merge." }
       ];
-      if (opts.hasDashboard !== false) installPlanSteps.push({ id: "dashboard", title: "Publish dashboard", eta: "1-3 min", state: "pending", detail: "GitHub Pages builds the dashboard and this page waits until the link is live." });
-      if (imgs.length) installPlanSteps.push({ id: "image", title: "Copy worker container image" + (imgs.length > 1 ? "s" : ""), eta: "~1 min", state: "pending", detail: `Copies the shared LabVIEW container into ${esc(imgs.join(" + "))}; your project's VIPC/Dragon dependencies are applied later via a separate, opt-in action.` });
+      if (opts.hasDashboard !== false) installPlanSteps.push({ id: "dashboard", title: "Publish dashboard", eta: "5-8 min", state: "pending", detail: "GitHub Pages builds the dashboard and this page waits until the link is live." });
+      if (imgs.length) installPlanSteps.push({ id: "image", title: "Copy worker container image" + (imgs.length > 1 ? "s" : ""), eta: "30-60 sec", state: "pending", detail: `Copies the shared LabVIEW container into ${esc(imgs.join(" + "))}; your project's VIPC/Dragon dependencies are applied later via a separate, opt-in action.` });
       installPlanSteps.push({ id: "ready", title: "Ready for CI runs", eta: "done", state: "pending", detail: "Dashboard link works and selected container workers are available." });
       renderInstallPlan();
     }
@@ -1600,7 +1646,6 @@
         '      - "Mass Compile \u2014 Windows Container"',
         '      - "Mass Compile Backfill \u2014 Windows Container"',
         '      - "Run VI Analyzer \u2014 Windows Container"',
-        '      - "Run VI Analyzer \u2014 Linux Container"',
         '      - "VIDiff Report \u2014 Windows Container"',
         '      - "VIDiff Report \u2014 Linux Container"',
         '      - "VIDiff Deploy \u2014 Pages + PR Comment"',
@@ -1642,6 +1687,22 @@
         "        with:",
         "          github-token: ${{ secrets.GITHUB_TOKEN }}",
         "      - name: Deploy dashboard to GitHub Pages",
+        "        id: deploy",
+        "        continue-on-error: true",
+        "        uses: peaceiris/actions-gh-pages@v4.1.0",
+        "        with:",
+        "          github_token: ${{ secrets.GITHUB_TOKEN }}",
+        "          publish_dir: ci-out/dashboard",
+        "          destination_dir: .",
+        "          keep_files: true",
+        "      # Retry once if a concurrent gh-pages push (configurator site, VI",
+        "      # snapshots, report deploys) made this a non-fast-forward; peaceiris",
+        "      # re-clones gh-pages each run, so the retry starts from the new tip.",
+        "      - name: Wait out a gh-pages push race",
+        "        if: steps.deploy.outcome == 'failure'",
+        "        run: sleep 30",
+        "      - name: Deploy dashboard to GitHub Pages (retry)",
+        "        if: steps.deploy.outcome == 'failure'",
         "        uses: peaceiris/actions-gh-pages@v4.1.0",
         "        with:",
         "          github_token: ${{ secrets.GITHUB_TOKEN }}",
@@ -1955,8 +2016,8 @@
 
     async function watchInstallImageBuilds(repo, branch, setup, sinceMs) {
       const targets = [];
-      if (setup.buildImage) targets.push({ label: "Windows worker image", workflow: "build-labview-image.yml", dispatch: true, inputs: { copy_only: "true" } });
-      if (setup.buildLinuxImage) targets.push({ label: "Linux worker image", workflow: "build-labview-linux-image.yml", dispatch: false });
+      if (setup.buildImage) targets.push({ label: "Windows worker image", workflow: "copy-labview-image.yml", dispatch: true });
+      if (setup.buildLinuxImage) targets.push({ label: "Linux worker image", workflow: "copy-labview-linux-image.yml", dispatch: true });
       if (setup.buildWindowsBeta) targets.push({ label: "Windows Beta worker image", workflow: "build-labview-windows-beta-image.yml", dispatch: true, inputs: { copy_only: "true" } });
       if (!targets.length) return "skipped";
       const states = {};
@@ -1992,22 +2053,24 @@
       return "warn";
     }
 
-    // Kick off the worker container IMAGE build the moment the install merges, when
-    // the custom-image capability is installed. Every Windows container activity (mass
+    // Seed the worker container IMAGE the moment the install merges, when the
+    // custom-image capability is installed. Every Windows container activity (mass
     // compile, VI Analyzer, VIDiff, snapshots, unit tests, Antidoc) runs inside
-    // ghcr.io/<owner>/<repo>-labview, which is built with the baked dependency VIPC and
-    // does NOT exist until this build runs — so a fresh install must build it once.
-    // build-labview-image.yml never auto-runs on the install merge (it only adds
-    // .github/** files, which its push trigger excludes), so we dispatch it here.
+    // ghcr.io/<owner>/<repo>-labview, which is seeded by COPYING the LCWC base and
+    // does NOT exist until this copy runs — so a fresh install must seed it once.
+    // copy-labview-image.yml never auto-runs on the install merge (the install only
+    // adds .github/** files), so we dispatch it here. The separate dependency bake
+    // (build-labview-image.yml) is opt-in later from the Dependencies page.
     // Best-effort: a 404 means the workflow isn't on the default branch yet (rare), so
     // we briefly retry, then fall back silently (the dashboard's Build worker image
     // button and the first CI run's wait-for-image both cover it).
     async function buildWorkerImageNow(repo, branch) {
-      // copy_only=true: a fresh install ALWAYS just copies the LCWC base image into
-      // this repo's GHCR (seconds), never baking dependencies. Project VIPC / capability
-      // dependencies are applied afterwards from the Dependencies page, so an install
-      // can never trigger an hour-long worker rebuild.
-      return dispatchWorkflow(repo, "build-labview-image.yml", branch, { copy_only: "true" });
+      // A fresh install ALWAYS just COPIES the LCWC base image into this repo's GHCR
+      // (seconds) via the dedicated Copy workflow -- never baking dependencies. Project
+      // VIPC / capability dependencies are applied afterwards from the Dependencies page
+      // via the separate Build LabVIEW CI Image workflow, so an install can never
+      // trigger an hour-long worker rebuild.
+      return dispatchWorkflow(repo, "copy-labview-image.yml", branch);
     }
 
     // Semver-ish compare (major.minor.patch). Returns >0 when a>b, <0 when a<b.
@@ -2022,16 +2085,23 @@
     // confirm a re-install/update actually republished, rather than the OLD
     // dashboard simply still being served.
     async function deployedAtLeast(dashUrl, want) {
+      const have = await publishedCatalogVersion(dashUrl);
+      return !!(have && cmpVerStr(have, want) >= 0);
+    }
+    // The version of the catalog.json currently published next to the dashboard
+    // URL, or "" when the dashboard isn't live yet (404 / unreachable). GitHub
+    // Pages sends Access-Control-Allow-Origin:* so this cross-origin read works.
+    async function publishedCatalogVersion(dashUrl) {
       try {
         const dir = dashUrl.replace(/[^/]*$/, "");            // .../repo/  or strip a trailing index.html
         const ctrl = new AbortController();
         const to = setTimeout(() => ctrl.abort(), 8000);
         const res = await fetch(dir + "catalog.json?_=" + Date.now(), { cache: "no-store", signal: ctrl.signal });
         clearTimeout(to);
-        if (!res.ok) return false;
+        if (!res.ok) return "";
         const cat = await res.json();
-        return !!(cat && cat.version && cmpVerStr(cat.version, want) >= 0);
-      } catch (_) { return false; }
+        return (cat && cat.version) ? String(cat.version) : "";
+      } catch (_) { return ""; }
     }
 
     // Watch the published dashboard URL until GitHub Pages actually serves it, so the
@@ -2186,9 +2256,10 @@
         setInsBar(0.62);
         const nx = $("insNext"); if (nx) nx.style.display = "none";
 
-        // Build/watch worker container images now so the container CI activities have
-        // an image to run in. Windows is dispatched here; Linux starts from the merge
-        // push because its workflow file is part of the install. Both are tracked.
+        // Seed the worker container images now so the container CI activities have an
+        // image to run in. Windows and Linux each dispatch their dedicated Copy workflow
+        // (copy-labview-image.yml / copy-labview-linux-image.yml) -- a fast registry copy
+        // of the shared LCWC base, no dependency build. Both are tracked.
         const mergeAt = Date.now();
         const imagePromise = setup.buildImages ? watchInstallImageBuilds(repo, setup.branch, setup, mergeAt) : Promise.resolve("skipped");
         async function finishAfterImages(kind, message) {
@@ -2627,6 +2698,27 @@
         files.filter(f => f.isText).forEach(f => {
           treeItems.push({ path: f.path, mode: "100644", type: "blob", content: f.content });
         });
+        // Mirror each installed directory entry against the source: an earlier install
+        // (or an older tooling version) may have shipped files the current tooling has
+        // since REMOVED. Left inside a vendored directory they can break the build --
+        // e.g. an orphaned viserver_windows.go duplicated Go declarations and broke the
+        // Windows VI Browser 2.0 render after that file was dropped. Delete target files
+        // under each installed dir entry that the source no longer ships, except the
+        // consumer's own preserved config files. Mirrors install.py's update-mode prune
+        // so the browser "Apply" path stays in sync with "Update now". Best-effort: a
+        // listing failure must never abort the install.
+        try {
+          const dirEntries = wanted.filter(e => e.endsWith("/"));
+          if (dirEntries.length) {
+            const tgtTree = await ghWrite(`/repos/${repo}/git/trees/${baseTree}?recursive=1`, null, "list your repository's tooling files");
+            const writing = new Set(files.map(f => f.path));
+            (tgtTree.tree || [])
+              .filter(t => t.type === "blob" && t.path)
+              .map(t => t.path)
+              .filter(p => dirEntries.some(d => p.startsWith(d)) && !paths.has(p) && !writing.has(p) && !isUserConfig(p))
+              .forEach(p => { if (!setup.removed.includes(p)) setup.removed.push(p); });
+          }
+        } catch (_) { /* best-effort prune */ }
         // Remove stale tooling files (sha:null deletes the path from base_tree).
         (setup.removed || []).forEach(p => treeItems.push({ path: p, mode: "100644", type: "blob", sha: null }));
 

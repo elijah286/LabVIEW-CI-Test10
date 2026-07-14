@@ -1,20 +1,23 @@
 name: Build LabVIEW CI Image - Linux
-run-name: ${{ github.event_name == 'push' && 'Copy Linux worker image (seed from LCWC base, no build)' || 'Build Linux worker image (apply dependencies)' }}
+run-name: ${{ github.event_name == 'push' && 'Build Linux worker image (monitored dependency change)' || 'Build Linux worker image (apply dependencies)' }}
 
 on:
-  # The image build is a heavy CI process and is NEVER auto-triggered by a project
-  # dependency change. Adding or changing a project *.vipc does NOT rebuild the
-  # worker: dependency updates are explicit/opt-in (the dashboard dialog dispatches
-  # this workflow, or a manual workflow_dispatch). It still rebuilds when the
-  # tooling's own Linux build recipe changes, monthly for base-image security, or
-  # on demand.
+  # The Linux worker BAKE -- distinct from the install seed, which is the separate
+  # copy-labview-linux-image.yml (a fast crane copy of the shared LCWC Linux base).
+  # By DEFAULT a project dependency change does NOT rebuild the worker; the user is
+  # notified by the dashboard banner and applies the update on demand. A project CAN
+  # opt an individual *.vipc into automatic rebuilds via the per-file Monitor toggle
+  # (config.container.vipc[].monitor, default false); a push that changes a MONITORED
+  # *.vipc then rebuilds and re-pushes the worker -- identical to the Windows worker.
+  # The gate enforces this opt-in; the monthly cron rebuilds for base-image security.
   push:
     branches: [main]
     paths:
-      - '.github/docker/labview-ci-linux.Dockerfile'
-      - '.github/labview/vipm/install-vipc-linux.sh'
-      - '.github/labview/build-worker-manifest.py'
-      - '.github/workflows/build-labview-linux-image.yml'
+      # Only a project dependency change (outside the tooling dir) is considered; the
+      # gate then rebuilds solely when a changed *.vipc is monitored. Tooling / base
+      # changes rebuild via the monthly cron or an explicit dispatch, not a push.
+      - '**.vipc'
+      - '!.github/**'
   schedule:
     # Monthly rebuild to pick up NI base image security updates
     - cron: '0 4 1 * *'
@@ -49,19 +52,96 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # This workflow only runs when the tooling's own Linux build recipe changes, on the
-  # monthly base-image security cron, or on explicit dispatch -- adding/changing a
-  # project .vipc never triggers it. So a rebuild is always intended when it starts.
-  # The gate is kept as a tiny, always-true step so the downstream `needs: gate`
-  # wiring is left untouched.
+  # Decide whether this push should rebuild the worker. Auto-rebuild is per monitored
+  # file -- identical to the Windows worker: a push rebuilds only when it
+  # changes a *.vipc the project flagged monitor:true in config.container.vipc[].
+  # Manual dispatch and the monthly cron always rebuild. Any non-monitored change,
+  # and any uncertainty/error, leaves the heavy build for an explicit dispatch (the
+  # dashboard banner still flags that dependencies need installing). The install
+  # SEED is a separate workflow (copy-labview-linux-image.yml), so nothing here is
+  # needed to give a fresh install a worker.
   gate:
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.decide.outputs.build }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Decide whether to rebuild
         id: decide
-        run: echo "build=true" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess, pathlib
+
+          def emit(build, why):
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write('build=%s\n' % ('true' if build else 'false'))
+              print('rebuild =', build, '--', why)
+              raise SystemExit(0)
+
+          try:
+              if os.environ.get('EVENT_NAME', '') != 'push':
+                  emit(True, 'dispatch/schedule -> always rebuild')
+              before = os.environ.get('BEFORE', '') or ''
+              sha = os.environ.get('SHA', '') or 'HEAD'
+              if not before or set(before) == {'0'}:
+                  emit(False, 'no diff base on push -> skip (opt-in)')
+              diff = subprocess.run(['git', 'diff', '--name-only', before, sha],
+                                    capture_output=True, text=True)
+              if diff.returncode != 0:
+                  emit(False, 'git diff failed -> skip (opt-in)')
+              files = [f for f in diff.stdout.splitlines() if f.strip()]
+              dep_changed = [f for f in files
+                             if f.lower().endswith('.vipc')
+                             and not f.replace(os.sep, '/').startswith('.github/')]
+              if not dep_changed:
+                  emit(False, 'no project .vipc changed -> skip')
+
+              # Per-file monitor flags from config.container.vipc (default OFF).
+              monitor = {}
+              cfg = pathlib.Path('.github/labview-ci.yml')
+              if cfg.exists():
+                  in_c = False; in_list = None; cur = None
+                  for line in cfg.read_text(encoding='utf-8').splitlines():
+                      if re.match(r'^container:\s*$', line):
+                          in_c = True; in_list = None; cur = None; continue
+                      if not in_c:
+                          continue
+                      if re.match(r'^\S', line):
+                          in_c = False; in_list = None; cur = None; continue
+                      mk = re.match(r'^\s{4}(\w+):\s*$', line)
+                      if mk:
+                          in_list = mk.group(1) if mk.group(1) in ('vipc', 'dragon') else None
+                          cur = None; continue
+                      if re.match(r'^\s{4}\w+:\s*\S', line):
+                          in_list = None; cur = None; continue
+                      if in_list:
+                          m = re.match(r'^\s{6}-\s*path:\s*"?([^"]+?)"?\s*$', line)
+                          if m:
+                              cur = m.group(1).strip().replace('\\', '/')
+                              monitor.setdefault(cur, False); continue
+                          m = re.match(r'^\s{8}monitor:\s*(\S+)', line)
+                          if m and cur is not None:
+                              monitor[cur] = (m.group(1).strip().lower() == 'true')
+
+              for f in dep_changed:
+                  key = f.replace(os.sep, '/')
+                  if monitor.get(key, False):
+                      emit(True, 'monitored .vipc changed: ' + f)
+              emit(False, 'changed .vipc are not monitored -> skip')
+          except SystemExit:
+              raise
+          except Exception as e:
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write('build=false\n')
+              print('gate error -> build=false:', e)
+          PY
 
   build-and-push:
     needs: gate
@@ -119,40 +199,48 @@ jobs:
 
       - name: Stage repo VIPC files
         id: vipc
+        shell: bash
         run: |
           python3 - <<'PY'
           import os, re, glob, shutil, pathlib
-          dest = pathlib.Path('.github/labview/vipm-linux'); dest.mkdir(parents=True, exist_ok=True)
-          # Install/seed (and tooling-recipe pushes) must NEVER bake project dependencies, so a
-          # fresh install is a constant-time base build no matter how many .vipc / .dragon files
-          # the repo ships. Project VIPC is staged (and baked) only on an explicit dependency
-          # rebuild: a manual workflow_dispatch from the Dependencies page, or the monthly
-          # base-image rebuild (schedule). On a push (the install merge or a tooling update) the
-          # worker is seeded as a plain NI + LabVIEW base and the dashboard then flags any
-          # project dependencies for an opt-in apply.
-          if os.environ.get('GITHUB_EVENT_NAME', '') == 'push':
-            print('Install/seed (push): skipping project VIPC staging so install time stays constant regardless of how many .vipc/.dragon files the repo has; dependencies are applied later via an opt-in rebuild.')
-            with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
-              out.write('count=0\n')
-            raise SystemExit(0)
-          paths = []
+          dest = pathlib.Path('.github/labview/vipm'); dest.mkdir(parents=True, exist_ok=True)
           cfg = pathlib.Path('.github/labview-ci.yml')
-          if cfg.exists():
-            in_c = in_v = False
+
+          def configured_vipcs():
+            selected = []
+            saw_list = False
+            cur = None
+            if not cfg.exists():
+              return selected, saw_list
+            in_c = False
+            in_v = False
             for line in cfg.read_text(encoding='utf-8').splitlines():
               if re.match(r'^\s*container:\s*$', line):
-                in_c = True; in_v = False; continue
-              if in_c and re.match(r'^\s{4}vipc:\s*$', line):
-                in_v = True; continue
+                in_c = True; in_v = False; cur = None; continue
+              if not in_c:
+                continue
+              if re.match(r'^\S', line):
+                in_c = False; in_v = False; cur = None; continue
+              if re.match(r'^\s{4}vipc:\s*$', line):
+                in_v = True; saw_list = True; cur = None; continue
+              if re.match(r'^\s{4}\w+:\s*$', line):
+                in_v = False; cur = None; continue
+              if re.match(r'^\s{4}\w+:\s*\S', line):
+                in_v = False; cur = None; continue
               if in_v:
                 m = re.match(r'^\s{6}-\s*path:\s*"?([^"]+?)"?\s*$', line)
                 if m:
-                  paths.append(m.group(1).strip()); continue
-                if re.match(r'^\s{0,4}\S', line):
-                  in_v = False; in_c = False
-              elif in_c and re.match(r'^\S', line):
-                in_c = False
-          if not paths:
+                  cur = m.group(1).strip().replace('\\', '/')
+                  continue
+                m = re.match(r'^\s{8}monitor:\s*(\S+)', line)
+                if m and cur is not None:
+                  if m.group(1).strip().lower() == 'true':
+                    selected.append(cur)
+                  cur = None
+            return selected, saw_list
+
+          paths, saw_vipc_list = configured_vipcs()
+          if not paths and not saw_vipc_list:
             paths = sorted(
               p for p in glob.glob('**/*.vipc', recursive=True)
               if not p.replace(os.sep, '/').startswith('.github/')
@@ -169,7 +257,6 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
             out.write(f'count={staged}\n')
           PY
-
       - name: Compute worker version
         id: ver
         env:
@@ -193,11 +280,17 @@ jobs:
                 pathlib.Path('.github/docker/labview-ci-linux.Dockerfile'),
                 pathlib.Path('.github/labview/vipm/install-vipc-linux.sh'),
             ]
-            files += sorted(pathlib.Path('.github/labview/vipm-linux').glob('*.vipc'), key=lambda p: p.name.lower())
+            files += sorted(pathlib.Path('.github/labview/vipm').glob('*.vipc'), key=lambda p: p.name.lower())
+            # The VI Browser 2.0 render engine (lvctl + runner) is baked into this
+            # worker, so its source must factor into the version -- an engine change
+            # must yield a new worker image so clients pick it up on the next copy.
+            toimages = pathlib.Path('.github/labview/toimages')
+            if toimages.is_dir():
+              files += sorted((p for p in toimages.rglob('*') if p.is_file()), key=lambda p: p.as_posix().lower())
             parts = []
             for path in files:
               if path.exists():
-                parts.append(f'{path.name}={hashlib.sha256(path.read_bytes()).hexdigest()}')
+                parts.append(f'{path.as_posix()}={hashlib.sha256(path.read_bytes()).hexdigest()}')
           version = 'linux-' + hashlib.sha256('\n'.join(parts).encode('utf-8')).hexdigest()[:12]
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
             f.write(f'version={version}\n')
@@ -220,12 +313,12 @@ jobs:
           lcwc_base="${LCWC_LINUX_BASE_IMAGE}"
 
           if [ "${IS_SOURCE}" != "true" ] && [ "${VIPC_COUNT:-0}" = "0" ]; then
-            # CLIENT install/seed: duplicate the shared LCWC Linux worker image into this
-            # repository's own GHCR package with crane -- a registry-to-registry copy, no
-            # rebuild. The client OWNS the copy and can bake dependencies onto it later via
-            # the opt-in dependency rebuild. Mirrors the Windows copy path, so a Linux
-            # install is a fast copy regardless of how many .vipc/.dragon files exist.
-            echo "::notice::Copying the shared LCWC Linux worker image (${lcwc_base}) into ${base} with crane -- no rebuild. The client owns this independent duplicate."
+            # NO-DEPENDENCIES FALLBACK: a client dispatched a bake but declares no project
+            # VIPC, so there is nothing to install -- duplicate the shared LCWC Linux base
+            # into this repository's own GHCR package with crane (a registry-to-registry
+            # copy, no rebuild). The fresh-install SEED is the separate
+            # copy-labview-linux-image.yml; this branch only handles a dependency-less bake.
+            echo "::notice::No project VIPC to bake -- copying the shared LCWC Linux base (${lcwc_base}) into ${base} with crane instead of rebuilding."
             immutable="${base}:${worker_version}"
             crane copy "${lcwc_base}" "${immutable}"
             for t in "${tag}" "${tag}-${date_tag}" "linux-latest"; do
@@ -271,28 +364,31 @@ jobs:
           image_ref="${{ env.IMAGE_NAME }}:${worker_version}"
           out_dir="ci-out/workers-pages/workers/linux/${worker_version}"
           mkdir -p ci-out/worker "$out_dir"
+          : > ci-out/worker/nipkg-list.txt
+          : > ci-out/worker/vipm-list.txt
           vipc_args=()
 
           if [ "${IS_SOURCE}" != "true" ] && [ "${VIPC_COUNT:-0}" = "0" ]; then
             # Seed-only copy: the worker mirrors the LCWC Linux base byte-for-byte and is
             # NOT present locally (copied at the registry level), so read the base metadata
             # from the registry with crane instead of pulling multiple gigabytes.
-            : > ci-out/worker/nipkg-list.txt
             base_image="${LCWC_LINUX_BASE_IMAGE}"
             base_digest="$(crane digest "${LCWC_LINUX_BASE_IMAGE}" 2>/dev/null || true)"
           else
             docker run --rm "$image_ref" bash -lc "nipkg list" > ci-out/worker/nipkg-list.txt 2>/dev/null || : > ci-out/worker/nipkg-list.txt
+            docker run --rm "$image_ref" bash -lc "vipm list --installed" > ci-out/worker/vipm-list.txt 2>/dev/null || : > ci-out/worker/vipm-list.txt
             base_image="nationalinstruments/labview:latest-linux"
             base_digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image_ref" 2>/dev/null || true)
             while IFS= read -r -d '' vipc_file; do
               vipc_args+=(--vipc "$vipc_file")
-            done < <(find .github/labview/vipm-linux -maxdepth 1 -type f -iname '*.vipc' -print0 | sort -z)
+            done < <(find .github/labview/vipm -maxdepth 1 -type f -iname '*.vipc' -print0 | sort -z)
           fi
 
           python3 .github/labview/build-worker-manifest.py \
             --platform linux \
             --version "$worker_version" \
             --nipkg-list ci-out/worker/nipkg-list.txt \
+            --vipm-list ci-out/worker/vipm-list.txt \
             --labview-version "${{ vars.LABVIEW_VERSION || '2026' }}" \
             --pages-url "${{ env.PAGES_URL }}" \
             --base-image "$base_image" \
@@ -314,13 +410,10 @@ jobs:
           JSON
 
       - name: Publish worker manifest to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4.1.0
+        uses: ./.github/actions/publish-gh-pages
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ci-out/workers-pages
-          destination_dir: .
-          keep_files: true
-
+          commit_message: Publish Linux worker manifest
       - name: Summary
         run: |
           echo "### Docker image published" >> "$GITHUB_STEP_SUMMARY"

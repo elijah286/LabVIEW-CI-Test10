@@ -1,8 +1,8 @@
 <!DOCTYPE html>
 <!--
   .github/pages/unit-tests.html
-  Top-level "Unit Testing" configurator. One tab per framework (Caraya, VI
-  Tester, and — coming soon — NI Unit Test Framework, plus room for more). For
+  Top-level "Unit Testing" configurator. One tab per framework (Caraya, LUnit,
+  VI Tester, and NI Unit Test Framework, plus room for more). For
   each enabled framework the user declares WHERE its tests live in the project
   (virtual-folder paths or globs); the CI runner auto-discovers tests within
   those locations by each framework's native convention. Settings are written to
@@ -20,6 +20,9 @@
   <style>
     :root{--bg:#0d1117;--surface:#161b22;--surface2:#0d1117;--border:#30363d;--fg:#e6edf3;--muted:#8b949e;--link:#58a6ff;--accent:#238636;--accent-fg:#fff;--chip:#21262d;--code:#010409;--warn:#9a6700}
     @media(prefers-color-scheme:light){:root{--bg:#fff;--surface:#f6f8fa;--surface2:#fff;--border:#d0d7de;--fg:#1f2328;--muted:#57606a;--link:#0969da;--accent:#1f883d;--chip:#eaeef2;--code:#f6f8fa}}
+    /* Re-assert page-specific tokens the shared header's theme toggle doesn't manage. */
+    :root[data-lvci-theme=dark]{--surface2:#0d1117;--muted:#8b949e}
+    :root[data-lvci-theme=light]{--surface2:#fff;--muted:#57606a}
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.5}
     a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
@@ -149,6 +152,9 @@
       { id: "caraya",    name: "Caraya",
         conv: "Caraya tests are <b>VIs that contain Caraya assertions</b> (e.g. <code>Assert Equal.vi</code>). The runner executes every such VI found within the locations below.",
         ph: "e.g. tests/  or  **/*Tests.vi" },
+      { id: "lunit",     name: "LUnit",
+        conv: "LUnit (Astemes) tests are <b>Test Case classes</b> (<code>.lvclass</code> inheriting from LUnit's Test Case). The runner invokes the native <code>LabVIEWCLI -OperationName LUnit</code> operation, which discovers and runs every Test Case within the locations below.",
+        ph: "e.g. tests/  or  source/**/*.lvclass" },
       { id: "vi-tester", name: "VI Tester",
         conv: "VI Tester tests are <b>TestCase classes</b> (<code>.lvclass</code> inheriting from <code>TestCase</code>). The runner discovers and runs every TestCase within the locations below.",
         ph: "e.g. tests/  or  source/**/*.lvclass" },
