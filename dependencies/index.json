@@ -199,17 +199,39 @@
       "tag": "latest",
       "ready": true,
       "packages": [
-        "dataflow_g_lib_g_image-0.5.0.1",
-        "jki_lib_caraya-1.4.4.148",
-        "jki_vi_tester",
-        "ni_lib_junit_results_api-1.0.1.6",
-        "ni_lib_utf_junit_report-1.0.1.43",
-        "oglib_appcontrol-4.1.0.7",
-        "oglib_array-4.1.0.13",
-        "oglib_error-4.2.0.23",
-        "oglib_file-4.0.0.20",
-        "oglib_lvdata-4.2.0.21",
-        "oglib_string-4.1.0.12"
+        "astemes_lib_lunit",
+        "astemes_lib_lunit-v2.0.13.6",
+        "astemes_lib_lunit_cli",
+        "astemes_lib_lunit_cli-v1.6.1.23",
+        "dataflow_g_lib_g_image",
+        "dataflow_g_lib_g_image-v0.5.0.1",
+        "Installed",
+        "jki_lib_caraya",
+        "jki_lib_caraya-v1.4.4.148",
+        "jki_lib_state_machine",
+        "jki_lib_state_machine-v2024.0.3.23",
+        "labview_open_source_lib_epoch_datetime",
+        "labview_open_source_lib_epoch_datetime-v1.3.0.8",
+        "labview_open_source_project_lib_labview_open_source_palette",
+        "labview_open_source_project_lib_labview_open_source_palette-v1.0.2.7",
+        "ni_lib_junit_results_api",
+        "ni_lib_junit_results_api-v1.0.1.6",
+        "ni_lib_simple_xml",
+        "ni_lib_simple_xml-v1.0.0.4",
+        "ni_lib_utf_junit_report",
+        "ni_lib_utf_junit_report-v1.0.1.43",
+        "oglib_appcontrol",
+        "oglib_appcontrol-v4.1.0.7",
+        "oglib_array",
+        "oglib_array-v6.0.1.20",
+        "oglib_error",
+        "oglib_error-v6.0.0.26",
+        "oglib_file",
+        "oglib_file-v6.0.2.28",
+        "oglib_lvdata",
+        "oglib_lvdata-v6.0.0.45",
+        "oglib_string",
+        "oglib_string-v6.0.2.35"
       ],
       "failed_packages": [],
       "nipkg_ready": true,
@@ -389,6 +411,10 @@
         {
           "name": "eula-ni-standard",
           "version": "26.3.0.49236-0+f84"
+        },
+        {
+          "name": "eula-ni-standard",
+          "version": "26.5.0.49245-0+f93"
         },
         {
           "name": "jki-dragon",
@@ -597,6 +623,10 @@
         {
           "name": "ni-certificates",
           "version": "26.3.0.49183-0+f31"
+        },
+        {
+          "name": "ni-certificates",
+          "version": "26.5.0.49183-0+f31"
         },
         {
           "name": "ni-codesignapi",
@@ -1335,6 +1365,10 @@
           "version": "26.3.0.49236-0+f84"
         },
         {
+          "name": "ni-msiproperties",
+          "version": "26.5.0.49245-0+f93"
+        },
+        {
           "name": "ni-mstudio-cw3dgraph",
           "version": "8.7.5.49154-0+f2"
         },
@@ -1567,6 +1601,10 @@
           "version": "26.3.0.49300-0+f148"
         },
         {
+          "name": "ni-package-manager",
+          "version": "26.5.0.49301-0+f149"
+        },
+        {
           "name": "ni-package-manager-deployment-support",
           "version": "17.5.0.49152-0+f0"
         },
@@ -1717,6 +1755,10 @@
         {
           "name": "ni-package-manager-deployment-support",
           "version": "26.3.0.49300-0+f148"
+        },
+        {
+          "name": "ni-package-manager-deployment-support",
+          "version": "26.5.0.49301-0+f149"
         },
         {
           "name": "ni-package-manager-released-feed",
@@ -1871,6 +1913,10 @@
           "version": "26.3.0.49300-0+f148"
         },
         {
+          "name": "ni-package-manager-released-feed",
+          "version": "26.5.0.49301-0+f149"
+        },
+        {
           "name": "ni-package-manager-upgrader",
           "version": "17.0.0.49157-0+f5"
         },
@@ -2025,6 +2071,10 @@
         {
           "name": "ni-package-manager-upgrader",
           "version": "26.3.0.49300-0+f148"
+        },
+        {
+          "name": "ni-package-manager-upgrader",
+          "version": "26.5.0.49301-0+f149"
         },
         {
           "name": "ni-portable-configuration",
@@ -2495,6 +2545,10 @@
           "version": "26.3.0.49300-0+f148"
         },
         {
+          "name": "system-windows-x64",
+          "version": "26.5.0.49301-0+f149"
+        },
+        {
           "name": "system-windows-x86",
           "version": "19.0.0.49152-0+f0"
         },
@@ -2528,7 +2582,7 @@
         }
       ],
       "labview_version": "2026",
-      "version": "win-69efe2314271"
+      "version": "win-6346c5a70649"
     },
     {
       "key": "linux",
